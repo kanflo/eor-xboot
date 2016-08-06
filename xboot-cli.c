@@ -26,25 +26,24 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
-#include <espressif/spi_flash.h>
+#include <espressif/esp_common.h>
 #include <esp/uart.h>
 #include <sysparam.h>
 #include <cli.h>
 
 #include "xboot-cli.h"
 #include "params.h"
-
 #include "timeutils.h"
 
 static void print_text_value(char *key, char *value)
 {
-    printf("  '%s' = '%s'\n", key, value);
+    printf("%s:%s\n", key, value);
 }
 
 static void print_binary_value(char *key, uint8_t *value, size_t len)
 {
     size_t i;
-    printf("  %s:", key);
+    printf("%s:", key);
     for (i = 0; i < len; i++) {
         if (!(i & 0x0f)) {
             printf("\n   ");
@@ -80,47 +79,25 @@ static sysparam_status_t dump_params(void) {
     }
 }
 
-static void wssid_name_cmd(uint32_t argc, char *argv[])
+static void write_param_cmd(uint32_t argc, char *argv[])
 {
-	sysparam_status_t status = sysparam_set_string(SSID_NAME_PARAM, argv[1]);
+	sysparam_status_t status = sysparam_set_string(argv[1], argv[2]);
 	if (status == SYSPARAM_OK) {
 		printf("ok\n");
 	} else {
-		printf("Error %d\n", status);
+		printf("error:write failed:%d\n", status);
 	}
 }
 
-static void rssid_name_cmd(uint32_t argc, char *argv[])
+static void read_param_cmd(uint32_t argc, char *argv[])
 {
-    char *ssid;
-	sysparam_status_t status = sysparam_get_string(SSID_NAME_PARAM, &ssid);
+    char *value;
+	sysparam_status_t status = sysparam_get_string(argv[1], &value);
 	if (status == SYSPARAM_OK) {
-		printf("%s:%s\n", SSID_NAME_PARAM, ssid);
-	    free(ssid);
+		printf("ok:%s:%s\n", argv[1], value);
+	    free(value);
 	} else {
-		printf("Error %d\n", status);
-	}
-}
-
-static void wssid_pass_cmd(uint32_t argc, char *argv[])
-{
-	sysparam_status_t status = sysparam_set_string(SSID_PASS_PARAM, argv[1]);
-	if (status == SYSPARAM_OK) {
-		printf("ok\n");
-	} else {
-		printf("Error %d\n", status);
-	}
-}
-
-static void rssid_pass_cmd(uint32_t argc, char *argv[])
-{
-    char *ssid;
-	sysparam_status_t status = sysparam_get_string(SSID_PASS_PARAM, &ssid);
-	if (status == SYSPARAM_OK) {
-		printf("%s:%s\n", SSID_PASS_PARAM, ssid);
-	    free(ssid);
-	} else {
-		printf("Error %d\n", status);
+		printf("error:read failed:%d\n", status);
 	}
 }
 
@@ -129,9 +106,9 @@ static void dump_cmd(uint32_t argc, char *argv[])
 	printf("Dumping sysparam\n");
 	sysparam_status_t status = dump_params();
 	if (SYSPARAM_OK == status) {
-		printf("OK\n");
+		printf("ok\n");
 	} else {
-		printf("Dump failed, %d\n", status);
+		printf("error:dump failed:%d\n", status);
 	}
 }
 
@@ -154,32 +131,71 @@ static void format_cmd(uint32_t argc, char *argv[])
 	    status = sysparam_init(base_addr, 0);
 	}
 	if (SYSPARAM_OK == status) {
-		printf("OK\n");
+		printf("ok\n");
 	} else {
-		printf("Formatting failed, %d\n", status);
+		printf("error: formatting failed:%d\n", status);
 	}
 }
 
-void enter_cli(void)
+void macaddr_cmd(uint32_t argc, char *argv[])
 {
-	bool start_cli = false;
+	(void) argc;
+	(void) argv;
+    uint8_t hwaddr[6];
+	if (!sdk_wifi_get_macaddr(STATION_IF, (uint8_t*) hwaddr)) {
+		printf("error: failed to read mac address\n");
+	}
+	printf("ok:" MACSTR "\n", MAC2STR(hwaddr));
+}
+
+void ipaddr_cmd(uint32_t argc, char *argv[])
+{
+	(void) argc;
+	(void) argv;
+	struct ip_info ipconfig;
+	if (!sdk_wifi_get_ip_info(STATION_IF, &ipconfig)) {
+		printf("error: failed to read ip address\n");
+	}
+	printf("ok:%d.%d.%d.%d\n", ip4_addr1(&ipconfig), ip4_addr2(&ipconfig), ip4_addr3(&ipconfig), ip4_addr4(&ipconfig));
+}
+
+void reset_cmd(uint32_t argc, char *argv[])
+{
+	(void) argc;
+	(void) argv;
+	printf("ok\n");
+	uart_flush_txfifo(0);
+	uart_flush_txfifo(1);
+	sdk_system_restart();
+	while(1) {}
+}
+
+bool enter_cli(void)
+{
+	bool enter = false;
 	uint32_t start = systime_ms();
 	do {
 		if (uart_getc_nowait(0) == ':') {
-			start_cli = true;
+			enter = true;
 			break;
 		}
 	} while(systime_ms() - start < CLI_TIMEOUT_MS);
-
-	if (start_cli) {
-	  const command_t cmds[] = {
-			CLI_CMD_USAGE("wsn",    wssid_name_cmd, 1, 1, "Set ssid name", "<ssid name>"),
-			CLI_CMD      ("rsn",    rssid_name_cmd, 0, 0, "Get ssid name"),
-			CLI_CMD_USAGE("wsp",    wssid_pass_cmd, 1, 1, "Set ssid password", "<ssid pass>"),
-			CLI_CMD      ("rsp",    rssid_pass_cmd, 0, 0, "Get ssid password"),
-			CLI_CMD      ("dump",   dump_cmd,       0, 0, "Dump sysparam"),
-			CLI_CMD      ("format", format_cmd,     0, 0, "Format sysparam"),
-	  };
-	  cli_run(cmds, sizeof(cmds) / sizeof(command_t), "the xboot cli");
+	if (enter) {
+		printf("cli ok\n");
 	}
+	return enter;
+}
+
+void start_cli(void)
+{
+	const command_t cmds[] = {
+		CLI_CMD_USAGE("wp",     write_param_cmd, 2, 2, "Write parameter", "<name> <value>"),
+		CLI_CMD_USAGE("rp",     read_param_cmd,  1, 1, "Read parameter", "<name>"),
+		CLI_CMD      ("dump",   dump_cmd,        0, 0, "Dump sysparam"),
+		CLI_CMD      ("format", format_cmd,      0, 0, "Format sysparam"),
+		CLI_CMD      ("ip",     ipaddr_cmd,      0, 0, "Print wifi ip address"),
+		CLI_CMD      ("mac",    macaddr_cmd,     0, 0, "Print wifi mac address"),
+		CLI_CMD      ("reset",  reset_cmd,       0, 0, "Reset system"),
+	};
+	cli_run(cmds, sizeof(cmds) / sizeof(command_t), "the xboot cli");
 }

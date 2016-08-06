@@ -28,15 +28,15 @@
 #include <FreeRTOS.h>
 #include <task.h>
 #include <ssid_config.h>
-#include <espressif/esp_sta.h>
-#include <espressif/esp_wifi.h>
 #include <semphr.h>
+#include <sysparam.h>
 #include <ota-tftp.h>
 #include <rboot-integration.h>
 #include <rboot.h>
 #include <rboot-api.h>
 #include <sysparam.h>
 
+#include "params.h"
 #include "xboot-cli.h"
 #include "timeutils.h"
 
@@ -62,17 +62,22 @@ static void wifi_task(void *pvParameters)
 {
 	uint8_t status	= 0;
 	uint8_t retries = 30;
-	struct sdk_station_config config = {
-		.ssid = WIFI_SSID,
-		.password = WIFI_PASS,
-	};
+	char *ssid_name = NULL;
+	char *ssid_pass = NULL;
+	struct sdk_station_config config;
 
-	printf("WiFi: connecting to WiFi\n");
+	(void) sysparam_get_string(PARAM_SSID_NAME, &ssid_name);
+	(void) sysparam_get_string(PARAM_SSID_PASS, &ssid_pass);
+	strncpy((char*) config.ssid, ssid_name, sizeof(config.ssid)-1);
+	strncpy((char*) config.password, ssid_pass, sizeof(config.password)-1);
+	free(ssid_name);
+	free(ssid_pass);
+
+	printf("Connecting to WiFi\n");
 	sdk_wifi_set_opmode(STATION_MODE);
 	sdk_wifi_station_set_config(&config);
 
-	while(1)
-	{
+	while(1) {
 		while ((status != STATION_GOT_IP) && (retries)){
 			status = sdk_wifi_station_get_connect_status();
 			printf("%s: status = %d\n", __func__, status );
@@ -105,23 +110,83 @@ static void wifi_task(void *pvParameters)
 	}
 }
 
+static void xboot_reset(void)
+{
+	uart_flush_txfifo(0);
+	uart_flush_txfifo(1);
+	sdk_system_restart();
+	while(1) {}
+}
+
+static void xboot_halt(void)
+{
+	printf("xboot halted\n");
+	while(1) {}
+}
+
+static void ota_init(void)
+{
+	bool enable_tftp = false;
+	(void) sysparam_get_bool(PARAM_TFTP_SERVER_ENABLE, &enable_tftp);
+	if (enable_tftp) {
+		ota_tftp_init_server(TFTP_PORT);
+	}
+}
+
+static void wifi_init(void)
+{
+	char *ssid_name = NULL;
+	char *ssid_pass = NULL;
+    vSemaphoreCreateBinary(wifi_alive);
+	(void) sysparam_get_string(PARAM_SSID_NAME, &ssid_name);
+	(void) sysparam_get_string(PARAM_SSID_PASS, &ssid_pass);
+	if (ssid_name && ssid_pass) {
+	    xTaskCreate(&wifi_task, (int8_t *)"wifi_task", 256, NULL, 2, NULL);
+	}
+	if (ssid_name) {
+		free(ssid_name);
+	}
+	if (ssid_pass) {
+		free(ssid_pass);
+	}
+}
+
 void user_init(void)
 {
     uart_set_baud(0, 115200);
-    printf("SDK version:%s\n", sdk_system_get_sdk_version());
 	rboot_config conf = rboot_get_config();
-    printf("\n\nxboot (%d/%d)\n", conf.current_rom, conf.count);
+    printf("\n\nxboot build with SDK %s\n", sdk_system_get_sdk_version());
 
+    if (conf.current_rom != 0) {
+		printf("Weird, xboot is not running in slot 0 but in slot %d\n", conf.current_rom);
+    }
     printf("Images in flash:\n");
-    for(int i = 0; i <conf.count; i++) {
-        printf("%c%d: offset 0x%08x\n", i == conf.current_rom ? '*':' ', i, conf.roms[i]);
+    for(int i = 0; i < conf.count; i++) {
+        printf("%c%d: offset 0x%08x\n", i == conf.current_rom ? '*' : ' ', i, conf.roms[i]);
     }
 	print_mac_and_ip();
 
-	ota_tftp_init_server(TFTP_PORT);
-	enter_cli();
-
-    vSemaphoreCreateBinary(wifi_alive);
-
-    xTaskCreate(&wifi_task, (int8_t *)"wifi_task", 256, NULL, 2, NULL);
+	if (conf.count == 1) {
+		printf("No bootable image found, entering CLI\n");
+		ota_init();
+		wifi_init();
+		start_cli();
+	} else {
+		if (enter_cli()) {
+			ota_init();
+			wifi_init();
+			start_cli();
+		} else {
+			printf("No CLI\n");
+		}
+		if (rboot_set_temp_rom(1)) {
+			xboot_reset();
+		} else {
+			printf("Error, failed to temp rom.\n");
+			xboot_halt();
+		}
+	}
+	while(1) {
+		vTaskDelay( 1000 / portTICK_RATE_MS );
+	}
 }
