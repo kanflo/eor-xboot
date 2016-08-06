@@ -35,6 +35,7 @@
 #include <rboot.h>
 #include <rboot-api.h>
 #include <sysparam.h>
+#include <dhcpserver.h>
 
 #include "params.h"
 #include "xboot-cli.h"
@@ -58,24 +59,10 @@ static void print_mac_and_ip(void)
 	printf("%s\n", msg);
 }
 
-static void wifi_task(void *pvParameters)
+static void wifi_client_task(void *pvParameters)
 {
 	uint8_t status	= 0;
 	uint8_t retries = 30;
-	char *ssid_name = NULL;
-	char *ssid_pass = NULL;
-	struct sdk_station_config config;
-
-	(void) sysparam_get_string(PARAM_SSID_NAME, &ssid_name);
-	(void) sysparam_get_string(PARAM_SSID_PASS, &ssid_pass);
-	strncpy((char*) config.ssid, ssid_name, sizeof(config.ssid)-1);
-	strncpy((char*) config.password, ssid_pass, sizeof(config.password)-1);
-	free(ssid_name);
-	free(ssid_pass);
-
-	printf("Connecting to WiFi\n");
-	sdk_wifi_set_opmode(STATION_MODE);
-	sdk_wifi_station_set_config(&config);
 
 	while(1) {
 		while ((status != STATION_GOT_IP) && (retries)){
@@ -138,16 +125,63 @@ static void wifi_init(void)
 	char *ssid_name = NULL;
 	char *ssid_pass = NULL;
     vSemaphoreCreateBinary(wifi_alive);
-	(void) sysparam_get_string(PARAM_SSID_NAME, &ssid_name);
-	(void) sysparam_get_string(PARAM_SSID_PASS, &ssid_pass);
-	if (ssid_name && ssid_pass) {
-	    xTaskCreate(&wifi_task, (int8_t *)"wifi_task", 256, NULL, 2, NULL);
-	}
-	if (ssid_name) {
-		free(ssid_name);
-	}
-	if (ssid_pass) {
-		free(ssid_pass);
+    bool ap_enable = false;
+	(void) sysparam_get_bool(PARAM_WIFI_AP_ENABLE, &ap_enable);
+	if (ap_enable) {
+		(void) sysparam_get_string(PARAM_WIFI_AP_SSID_NAME, &ssid_name);
+		(void) sysparam_get_string(PARAM_WIFI_AP_SSID_PAS, &ssid_pass);
+		if (ssid_name && ssid_pass) {
+		    sdk_wifi_set_opmode(SOFTAP_MODE);
+		    struct ip_info ap_ip;
+		    IP4_ADDR(&ap_ip.ip, 172, 16, 0, 1);
+		    IP4_ADDR(&ap_ip.gw, 0, 0, 0, 0);
+		    IP4_ADDR(&ap_ip.netmask, 255, 255, 0, 0);
+		    sdk_wifi_set_ip_info(1, &ap_ip);
+		    struct sdk_softap_config ap_config = {
+		        .ssid_hidden = 0,
+		        .channel = 3,
+		        .authmode = AUTH_WPA_WPA2_PSK,
+		        .max_connection = 3,
+		        .beacon_interval = 100,
+		    };
+			strncpy((char*) ap_config.ssid, ssid_name, sizeof(ap_config.ssid)-1);
+			strncpy((char*) ap_config.password, ssid_pass, sizeof(ap_config.password)-1);
+			ap_config.ssid_len = strlen((char*) ap_config.ssid);
+		    sdk_wifi_softap_set_config(&ap_config);
+
+		    ip_addr_t first_client_ip;
+		    IP4_ADDR(&first_client_ip, 172, 16, 0, 2);
+		    dhcpserver_start(&first_client_ip, 4);
+
+			free(ssid_name);
+			free(ssid_pass);
+		} else {
+			printf("error:no wifi credentials\n");
+		}
+	} else {
+		(void) sysparam_get_string(PARAM_SSID_NAME, &ssid_name);
+		(void) sysparam_get_string(PARAM_SSID_PASS, &ssid_pass);
+		if (ssid_name && ssid_pass) {
+			struct sdk_station_config config;
+			strncpy((char*) config.ssid, ssid_name, sizeof(config.ssid)-1);
+			strncpy((char*) config.password, ssid_pass, sizeof(config.password)-1);
+
+			printf("Connecting to WiFi\n");
+			sdk_wifi_set_opmode(STATION_MODE);
+			sdk_wifi_station_set_config(&config);
+		    xTaskCreate(&wifi_client_task, (int8_t *)"wifi_task", 256, NULL, 2, NULL);
+
+			free(ssid_name);
+			free(ssid_pass);
+		} else {
+			printf("error:no wifi credentials\n");
+		}
+		if (ssid_name) {
+			free(ssid_name);
+		}
+		if (ssid_pass) {
+			free(ssid_pass);
+		}
 	}
 }
 
